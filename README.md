@@ -225,5 +225,3 @@ git commit -m "Added complete front-end fetching logic and backend API endpoints
 git push
 
 ```
-
-Ab woh aapse aik sawal bhi nahi pooch sakega kyunki front-end state management aur backend Supabase queries dono ka structure tayyar hai.
