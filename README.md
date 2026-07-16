@@ -1,10 +1,4 @@
-Sahi baat hai, aik hi dafa aisa clean setup de dete hain ke usey baar baar poochne ki zaroorat hi na paray. Next.js ke mutabiq APIs banane ke liye hum **Route Handlers** (`route.ts`) use karte hain.
 
-Maine aapki har route (listings, profile, messages) ke liye front-end ke sath-sath backend API ka code bhi add kar diya hai, taake database integration ka poora skeleton tayyar ho jaye.
-
-Aap bas apne naye folders mein niche diye gaye tareeqay se files update kar lein:
-
----
 
 ### 1. Listings Folder Setup
 
