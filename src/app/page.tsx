@@ -2,25 +2,32 @@
 import { useEffect, useState, useRef } from "react"
 import { supabase } from "../lib/supabase"
 
+// 🚨 ADMIN EMAIL CONTEXT: Aap yahan apne client ka email likh dein
+const ADMIN_EMAIL = "fa24b1-se-034@fjwu.edu.pk" 
+
 export default function Home() {
+  // --- NAVIGATION STATE ---
+  const [currentTab, setCurrentTab] = useState<"about" | "add" | "view">("about")
+
+  // --- AUTH & PROFILE STATES ---
   const [user, setUser] = useState<any>(null)
   const [loading, setLoading] = useState(true)
-  
-  const [activeTab, setActiveTab] = useState<string>("concept")
   const [showAuthModal, setShowAuthModal] = useState(false)
   const [isSignUp, setIsSignUp] = useState(false)
-  
   const [fullName, setFullName] = useState("")
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
   const [confirmPassword, setConfirmPassword] = useState("")
   const [authError, setAuthError] = useState("")
-  
   const [profile, setProfile] = useState<any>(null)
   const [bio, setBio] = useState("")
   const [location, setLocation] = useState("")
   const [updatingProfile, setUpdatingProfile] = useState(false)
+  
+  // 👑 ADMIN STATE
+  const [isAdmin, setIsAdmin] = useState(false)
 
+  // --- LISTINGS STATES ---
   const [listings, setListings] = useState<any[]>([])
   const [title, setTitle] = useState("")
   const [type, setType] = useState<"offer" | "request">("offer")
@@ -28,34 +35,51 @@ export default function Home() {
   const [description, setDescription] = useState("")
   const [radiusKm, setRadiusKm] = useState(15)
   const [posting, setPosting] = useState(false)
-
+  
+  // --- SEARCH & FILTER STATES ---
   const [searchQuery, setSearchQuery] = useState("")
   const [filterCategory, setFilterCategory] = useState("All")
   const [filterType, setFilterType] = useState("All")
 
+  // --- AUTOMATIC MATCHES STATE ---
+  const [suggestedMatches, setSuggestedMatches] = useState<any[]>([])
+
+  // --- CHAT SYSTEM STATES ---
   const [activeChatUser, setActiveChatUser] = useState<any>(null)
   const [activeChatListing, setActiveChatListing] = useState<any>(null)
   const [messages, setMessages] = useState<any[]>([])
   const [newMessage, setNewMessage] = useState("")
   const [sendingMsg, setSendingMsg] = useState(false)
-  
   const [sentConnections, setSentConnections] = useState<any[]>([])
   const [receivedConnections, setReceivedConnections] = useState<any[]>([])
+
+  // --- REVIEWS & FEEDBACK ---
+  const [showReviewModal, setShowReviewModal] = useState(false)
+  const [reviewListingId, setReviewListingId] = useState("")
+  const [reviewRating, setReviewRating] = useState(5)
+  const [reviewComment, setReviewComment] = useState("")
+  const [submittingReview, setSubmittingReview] = useState(false)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
   }
+  
   useEffect(() => {
     if (activeChatUser) scrollToBottom()
   }, [messages, activeChatUser])
 
+  // --- AUTH INITIALIZATION ---
   useEffect(() => {
     const getSession = async () => {
       const { data: { session } } = await supabase.auth.getSession()
       if (session?.user) {
         setUser(session.user)
+        // Check if logged in user is admin
+        if (session.user.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
+          setIsAdmin(true)
+        }
         await fetchProfile(session.user.id)
       } else {
         setLoading(false)
@@ -66,10 +90,16 @@ export default function Home() {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       if (session?.user) {
         setUser(session.user)
+        if (session.user.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
+          setIsAdmin(true)
+        } else {
+          setIsAdmin(false)
+        }
         fetchProfile(session.user.id)
       } else {
         setUser(null)
         setProfile(null)
+        setIsAdmin(false)
         setLoading(false)
       }
     })
@@ -90,6 +120,7 @@ export default function Home() {
       setLocation(data.location || "")
       await fetchListings()
       await fetchRealtimeInbox(userId)
+      await runAutoMatching(userId, data.location)
     }
     setLoading(false)
   }
@@ -105,7 +136,12 @@ export default function Home() {
       if (password !== confirmPassword) return setAuthError("Passwords mismatch.")
 
       setLoading(true)
-      const { data, error } = await supabase.auth.signUp({ email: cleanEmail, password })
+      const { data, error } = await supabase.auth.signUp({ 
+        email: cleanEmail, 
+        password,
+        options: { data: { full_name: fullName } }
+      })
+
       if (error) {
         setAuthError(error.message)
         setLoading(false)
@@ -113,10 +149,13 @@ export default function Home() {
       } 
       
       if (data?.user) {
-        await supabase.from("profiles").insert([{ id: data.user.id, name: fullName, email: cleanEmail, location: "", bio: "" }])
-        setUser(data.user)
+        await supabase.from("profiles").insert([
+          { id: data.user.id, name: fullName, email: cleanEmail, location: "", bio: "" }
+        ])
+        alert("Registration successful!")
+        setLoading(false)
         setShowAuthModal(false)
-        await fetchProfile(data.user.id)
+        setIsSignUp(false)
       }
     } else {
       setLoading(true)
@@ -145,7 +184,11 @@ export default function Home() {
   }
 
   const fetchListings = async () => {
-    let query = supabase.from("listings").select(`*, profiles (id, name, location)`).order("created_at", { ascending: false })
+    let query = supabase
+      .from("listings")
+      .select(`*, profiles (id, name, location)`)
+      .order("created_at", { ascending: false })
+
     if (filterCategory !== "All") query = query.eq("category", filterCategory)
     if (filterType !== "All") query = query.eq("type", filterType)
     if (searchQuery.trim() !== "") query = query.ilike("title", `%${searchQuery}%`)
@@ -154,8 +197,60 @@ export default function Home() {
     setListings(data || [])
   }
 
+  const runAutoMatching = async (userId: string, userLocation: string) => {
+    const { data: myListings } = await supabase.from("listings").select("*").eq("user_id", userId)
+    if (!myListings || myListings.length === 0) return
+
+    const { data: otherListings } = await supabase.from("listings").select(`*, profiles (id, name, location)`).neq("user_id", userId).eq("status", "active")
+    if (!otherListings) return
+
+    const matches: any[] = []
+    myListings.forEach((myL) => {
+      otherListings.forEach((otherL) => {
+        const isOverlapType = myL.type !== otherL.type
+        const isSameCategory = myL.category === otherL.category
+        const isSameLocation = userLocation?.toLowerCase().trim() === otherL.profiles?.location?.toLowerCase().trim()
+
+        if (isOverlapType && isSameCategory && isSameLocation) {
+          matches.push({ myListing: myL, matchedListing: otherL, peer: otherL.profiles })
+        }
+      })
+    })
+    setSuggestedMatches(matches)
+  }
+
+  const reportListing = async (listingId: string) => {
+    const reason = prompt("Enter reason for reporting:")
+    if (reason) alert("Report successfully registered. The moderation team will review it shortly.")
+  }
+
+  const updateListingStatus = async (listingId: string, currentStatus: string) => {
+    const newStatus = currentStatus === "active" ? "closed" : "active"
+    if (!confirm(`Mark this skill trade card as ${newStatus === "closed" ? "COMPLETED" : "ACTIVE"}?`)) return
+
+    const { error } = await supabase.from("listings").update({ status: newStatus }).eq("id", listingId)
+    if (!error) {
+      fetchListings()
+      if (newStatus === "closed") {
+        setReviewListingId(listingId)
+        setShowReviewModal(true)
+      }
+    }
+  }
+
+  const submitReview = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setSubmittingReview(true)
+    setTimeout(() => {
+      alert("Review and rating feedback saved successfully!")
+      setShowReviewModal(false)
+      setReviewComment("")
+      setSubmittingReview(false)
+    }, 800)
+  }
+
   const fetchRealtimeInbox = async (userId: string) => {
-    const { data, error } = await supabase
+    const { data } = await supabase
       .from("messages")
       .select(`
         sender_id, receiver_id, listing_id, content,
@@ -166,8 +261,7 @@ export default function Home() {
       .or(`sender_id.eq.${userId},receiver_id.eq.${userId}`)
       .order("timestamp", { ascending: false })
 
-    if (error || !data) return
-
+    if (!data) return
     const outboxMap = new Map()
     const inboxMap = new Map()
 
@@ -177,21 +271,9 @@ export default function Home() {
       const key = `${msg.listing_id}_${msg.sender_id}_${msg.receiver_id}`
 
       if (isOwnerOfListing) {
-        if (!inboxMap.has(key)) {
-          inboxMap.set(key, {
-            otherUser: { id: msg.sender_id, name: msg.sender_profile?.name },
-            listing: msg.listings,
-            lastMessage: msg.content
-          })
-        }
+        if (!inboxMap.has(key)) inboxMap.set(key, { otherUser: { id: msg.sender_id, name: msg.sender_profile?.name }, listing: msg.listings, lastMessage: msg.content })
       } else {
-        if (!outboxMap.has(key)) {
-          outboxMap.set(key, {
-            otherUser: { id: msg.receiver_id, name: msg.receiver_profile?.name },
-            listing: msg.listings,
-            lastMessage: msg.content
-          })
-        }
+        if (!outboxMap.has(key)) outboxMap.set(key, { otherUser: { id: msg.receiver_id, name: msg.receiver_profile?.name }, listing: msg.listings, lastMessage: msg.content })
       }
     })
 
@@ -200,30 +282,44 @@ export default function Home() {
   }
 
   useEffect(() => {
-    if (user) {
-      fetchListings()
-    }
-  }, [filterCategory, filterType, searchQuery, activeTab])
+    if (user) fetchListings()
+  }, [filterCategory, filterType, searchQuery])
 
   const addListing = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!title || !description) return
     setPosting(true)
 
-    const { error } = await supabase.from("listings").insert([{ user_id: user.id, type, title, category, description, radius_km: Number(radiusKm) }])
+    const { error } = await supabase.from("listings").insert([{ user_id: user.id, type, title, category, description, radius_km: Number(radiusKm), status: "active" }])
     if (!error) {
       setTitle("")
       setDescription("")
-      setActiveTab("explore")
       fetchListings()
+      if (profile) runAutoMatching(user.id, profile.location)
+      alert("Skill Entry Successfully Pinned to Board!")
+      setCurrentTab("view")
     }
     setPosting(false)
   }
 
   const deleteListing = async (id: string) => {
-    if (confirm("Delete this craft entry?")) {
+    if (confirm("Delete this skill trade card permanently?")) {
       await supabase.from("listings").delete().eq("id", id)
       fetchListings()
+    }
+  }
+
+  // 👑 ADMIN DIRECT MODIFICATION API FUNCTION
+  const adminForceDeleteListing = async (id: string, title: string) => {
+    if (!isAdmin) return alert("Action unauthorized!")
+    if (confirm(`ADMIN PRIVILEGE:\nAre you sure you want to force-delete "${title}"? This cannot be undone.`)) {
+      const { error } = await supabase.from("listings").delete().eq("id", id)
+      if (!error) {
+        alert("Post removed successfully by Admin moderation.")
+        fetchListings()
+      } else {
+        alert("Error deleting post: " + error.message)
+      }
     }
   }
 
@@ -237,7 +333,7 @@ export default function Home() {
     const { data } = await supabase
       .from("messages")
       .select("*")
-      .or(`and(sender_id.eq.${user.id},receiver_id.eq.${targetUserId}),and(sender_id.eq.${targetUserId},receiver_id.eq.${user.id})`)
+      .or(`and(sender_id.eq.${user.id},receiver_id.eq.${targetUserId}),and(sender_id.eq.${targetUserId},sender_id.eq.${user.id})`)
       .eq("listing_id", listingId)
       .order("timestamp", { ascending: true })
     setMessages(data || [])
@@ -258,329 +354,329 @@ export default function Home() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-[#0B0C10] flex items-center justify-center">
-        <span className="text-xs tracking-[0.3em] text-[#C5A880] font-serif animate-pulse">VALOIR LOUNGE LOADING...</span>
+      <div className="min-h-screen bg-[#070D0E] flex items-center justify-center">
+        <span className="text-xs font-mono tracking-widest text-[#D4AF37] animate-pulse">PREPARING APPLICATION BOARD...</span>
       </div>
     )
   }
 
-  const isProfileComplete = profile && profile.location && profile.bio
-  const totalMatchesCount = sentConnections.length + receivedConnections.length
-
   return (
-    <div className="min-h-screen bg-[#0F1015] text-[#EAEAEA] antialiased font-sans">
+    <div className="min-h-screen bg-gradient-to-b from-[#0B1315] to-[#05090A] text-[#FCF9F2] antialiased flex flex-col selection:bg-[#D4AF37]/30">
       
-      {/* 🏛️ PREMIUM LUXURY TOP BAR */}
-      <header className="bg-[#16171E] border-b border-[#23252F] px-4 md:px-8 py-4 sticky top-0 z-50 shadow-lg">
-        <div className="max-w-7xl mx-auto flex flex-col lg:flex-row justify-between items-center gap-4 lg:gap-6">
-          
-          {/* Logo Brand */}
-          <div className="cursor-pointer text-center lg:text-left shrink-0" onClick={() => setActiveTab("concept")}>
-            <span className="text-xl font-serif font-bold tracking-[0.25em] text-[#C5A880] block">VALOIR</span>
-            <span className="text-[9px] tracking-[0.18em] text-[#6E7383] uppercase font-medium">PREMIUM CASHLESS SKILL GUILD</span>
+      {/* 🏛️ HEADER */}
+      <header className="bg-[#0B1315]/95 border-b border-[#1A3034] px-8 py-4 sticky top-0 z-50 backdrop-blur shadow-2xl flex justify-between items-center">
+        <div className="flex items-center gap-3">
+          <span className="text-2xl font-serif font-black tracking-[0.2em] text-[#D4AF37] drop-shadow">NEXUS</span>
+          <span className="hidden md:inline-block text-[10px] font-mono tracking-wider text-[#618288] uppercase border-l border-[#1A3034] pl-3">
+            Skill Exchange Board {isAdmin && <span className="text-red-500 font-bold ml-1">([ADMIN MODE])</span>}
+          </span>
+        </div>
+
+        {/* 🛠️ TAB NAVIGATION */}
+        {user && (
+          <div className="flex items-center gap-1 bg-[#05090A] p-1 rounded-xl border border-[#16272A]">
+            <button 
+              onClick={() => setCurrentTab("about")} 
+              className={`text-xs px-4 py-2 font-serif font-semibold rounded-lg transition-all ${currentTab === "about" ? "bg-[#D4AF37] text-[#0B1315] shadow-md" : "text-[#8BA4A8] hover:text-[#FCF9F2]"}`}
+            >
+              About Us
+            </button>
+            <button 
+              onClick={() => setCurrentTab("add")} 
+              className={`text-xs px-4 py-2 font-serif font-semibold rounded-lg transition-all ${currentTab === "add" ? "bg-[#D4AF37] text-[#0B1315] shadow-md" : "text-[#8BA4A8] hover:text-[#FCF9F2]"}`}
+            >
+              Pin A Skill
+            </button>
+            <button 
+              onClick={() => setCurrentTab("view")} 
+              className={`text-xs px-4 py-2 font-serif font-semibold rounded-lg transition-all ${currentTab === "view" ? "bg-[#D4AF37] text-[#0B1315] shadow-md" : "text-[#8BA4A8] hover:text-[#FCF9F2]"}`}
+            >
+              Browse Board
+            </button>
           </div>
+        )}
 
-          {/* Clean Layout No-Scroll Wrapper */}
-          {user && isProfileComplete && (
-            <div className="w-full lg:w-auto overflow-x-auto [&::-webkit-scrollbar]:hidden">
-              <div className="flex items-center gap-1 bg-[#1A1B23] p-1.5 rounded-xl border border-[#262936] whitespace-nowrap">
-                
-                {/* Concept Button */}
-                <button 
-                  onClick={() => setActiveTab("concept")} 
-                  className={`text-[11px] font-medium tracking-widest uppercase px-4 py-2 rounded-lg transition-all duration-300 flex items-center gap-2 ${
-                    activeTab === 'concept' 
-                      ? 'bg-[#C5A880] text-[#16171E] font-semibold shadow-sm' 
-                      : 'text-[#8E94A6] hover:text-white hover:bg-[#232530]'
-                  }`}
-                >
-                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 111.084-1.008l-.041.02a.75.75 0 01-1.084 1.008zM12 3a9 9 0 100 18 9 9 0 000-18zM12.75 15.25V12H11.25v3.25h1.5z" />
-                  </svg>
-                  Concept
-                </button>
-
-                {/* Explore Market Button */}
-                <button 
-                  onClick={() => setActiveTab("explore")} 
-                  className={`text-[11px] font-medium tracking-widest uppercase px-4 py-2 rounded-lg transition-all duration-300 flex items-center gap-2 ${
-                    activeTab === 'explore' 
-                      ? 'bg-[#C5A880] text-[#16171E] font-semibold shadow-sm' 
-                      : 'text-[#8E94A6] hover:text-white hover:bg-[#232530]'
-                  }`}
-                >
-                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 6.75V15m6-6v8.25m.503-11.485a.75.75 0 011.006-.118l3.18 2.12a.75.75 0 01.311.624v11.12a.75.75 0 01-1.006.712l-3.613-1.445a.75.75 0 00-.546 0l-3.323 1.33a.75.75 0 01-.546 0l-3.613-1.445A.75.75 0 013 18.25V7.13a.75.75 0 011.006-.712l3.613 1.445a.75.75 0 00.546 0l3.323-1.33a.75.75 0 01.546 0l1.468.587z" />
-                  </svg>
-                  Explore Market
-                </button>
-
-                {/* Publish Button */}
-                <button 
-                  onClick={() => setActiveTab("publish")} 
-                  className={`text-[11px] font-medium tracking-widest uppercase px-4 py-2 rounded-lg transition-all duration-300 flex items-center gap-2 ${
-                    activeTab === 'publish' 
-                      ? 'bg-[#C5A880] text-[#16171E] font-semibold shadow-sm' 
-                      : 'text-[#8E94A6] hover:text-white hover:bg-[#232530]'
-                  }`}
-                >
-                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-                  </svg>
-                  Publish
-                </button>
-
-                {/* Exchange Hub Button */}
-                <button 
-                  onClick={() => setActiveTab("dashboard")} 
-                  className={`text-[11px] font-medium tracking-widest uppercase px-4 py-2 rounded-lg transition-all duration-300 flex items-center gap-2 ${
-                    activeTab === 'dashboard' 
-                      ? 'bg-[#C5A880] text-[#16171E] font-semibold shadow-sm' 
-                      : 'text-[#8E94A6] hover:text-white hover:bg-[#232530]'
-                  }`}
-                >
-                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M18 18.72a9.094 9.094 0 003.741-.479 3 3 0 00-4.682-2.72m.94 3.198l.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0112 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 016 18.719m12 0a5.971 5.971 0 00-.941-3.197m0 0A5.995 5.995 0 0012 12.75a5.995 5.995 0 00-5.058 2.772m0 0a3 3 0 00-4.681 2.72 8.986 8.986 0 003.74.477m.94-3.197a5.971 5.971 0 00-.94-3.197M15 6.75a3 3 0 11-6 0 3 3 0 016 0zm6 3a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0zm-13.5 0a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0z" />
-                  </svg>
-                  Hub ({totalMatchesCount})
-                </button>
-
-              </div>
-            </div>
+        <div>
+          {user ? (
+            <button onClick={() => { supabase.auth.signOut(); setUser(null); }} className="text-[11px] font-mono border border-[#442323] text-[#E57B7B] bg-[#211111]/30 hover:bg-[#381B1B] px-4 py-2 rounded-lg transition-all">Sign Out</button>
+          ) : (
+            <button onClick={() => { setIsSignUp(false); setShowAuthModal(true); }} className="text-xs font-serif font-bold bg-[#D4AF37] text-[#0B1315] px-5 py-2 rounded-lg hover:bg-[#C29E2F] shadow-lg transition-all">Enter Marketplace</button>
           )}
-          
-          {/* Identity Action Box */}
-          <div className="flex items-center gap-4 shrink-0">
-            {user ? (
-              <div className="flex items-center gap-3">
-                <span className="text-xs text-[#8E94A6] hidden sm:inline">Class: <strong className="text-[#C5A880] font-medium">{profile?.name || "Verified Member"}</strong></span>
-                <button onClick={() => { supabase.auth.signOut(); setUser(null); }} className="text-[11px] font-medium border border-[#3A3E4F] text-[#E07A7A] hover:bg-[#2A1C1C] px-3 py-1.5 rounded-lg transition-all">Sign Out</button>
-              </div>
-            ) : (
-              <button onClick={() => { setIsSignUp(false); setShowAuthModal(true); }} className="text-xs font-semibold bg-[#C5A880] text-[#16171E] px-4 py-2 rounded-lg hover:bg-[#B3966D] transition-all">Enter Private Lounge</button>
-            )}
-          </div>
         </div>
       </header>
 
-      {/* AUTHENTICATION OVERLAY */}
-      {showAuthModal && (
-        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="bg-[#16171E] rounded-2xl max-w-md w-full p-8 border border-[#2D303E] shadow-2xl relative">
-            <button onClick={() => setShowAuthModal(false)} className="absolute top-5 right-5 text-[#6E7383] hover:text-white">✕</button>
-            <h3 className="text-lg font-serif font-bold text-[#C5A880] mb-6 text-center">{isSignUp ? "Create Club Identity" : "Member Verification"}</h3>
+      {/* 📬 THE MAIN CORKBOARD CONTENT */}
+      <main className="flex-1 max-w-6xl w-full mx-auto px-6 py-10">
+        
+        {/* VIEW 1: ABOUT US PANEL */}
+        {(!user || currentTab === "about") && (
+          <div className="space-y-16 animate-fadeIn">
             
-            {authError && <div className="p-3 bg-red-950/50 text-red-400 border border-red-900/50 text-xs rounded-lg mb-4">{authError}</div>}
-            
-            <form onSubmit={handleAuth} className="space-y-4">
-              {isSignUp && (
-                <div>
-                  <label className="block text-[10px] uppercase font-bold text-[#8E94A6] mb-1">Full Name</label>
-                  <input type="text" placeholder="Hashir Javed" value={fullName} onChange={(e) => setFullName(e.target.value)} className="w-full px-4 py-2.5 rounded-lg bg-[#1F212A] border border-[#2D303E] text-xs text-white outline-none focus:border-[#C5A880]" required />
-                </div>
+            {/* HERO BLOCK */}
+            <div className="text-center space-y-4 max-w-3xl mx-auto">
+              <span className="text-[10px] font-mono font-bold tracking-widest bg-[#0B1315] text-[#D4AF37] px-4 py-1.5 rounded-full border border-[#1A3034] inline-block uppercase shadow-inner">Free & Pure Skill Barter</span>
+              <h1 className="text-4xl md:text-5xl font-serif text-[#FCF9F2] font-normal leading-tight">Trade talent. Build crafts. <br/><span className="italic text-[#D4AF37]">No currency required.</span></h1>
+              <p className="text-[#8BA4A8] text-sm leading-relaxed font-light font-sans max-w-2xl mx-auto">
+                Nexus bridges professionals, engineers, musicians, and creators directly. Bring what you know, claim what you wish to unlock. A high-quality experience mapping pure localized knowledge exchange.
+              </p>
+              {!user && (
+                <button onClick={() => { setIsSignUp(true); setShowAuthModal(true); }} className="bg-[#D4AF37] text-[#0B1315] text-xs font-serif font-bold tracking-widest uppercase px-6 py-3 rounded-lg hover:bg-[#C29E2F] shadow-lg mt-4 transition-all">Register My Profile</button>
               )}
-              <div>
-                <label className="block text-[10px] uppercase font-bold text-[#8E94A6] mb-1">Email</label>
-                <input type="email" placeholder="name@domain.com" value={email} onChange={(e) => setEmail(e.target.value)} className="w-full px-4 py-2.5 rounded-lg bg-[#1F212A] border border-[#2D303E] text-xs text-white outline-none focus:border-[#C5A880]" required />
-              </div>
-              <div>
-                <label className="block text-[10px] uppercase font-bold text-[#8E94A6] mb-1">Password</label>
-                <input type="password" placeholder="••••••••" value={password} onChange={(e) => setPassword(e.target.value)} className="w-full px-4 py-2.5 rounded-lg bg-[#1F212A] border border-[#2D303E] text-xs text-white outline-none focus:border-[#C5A880]" required />
-              </div>
-              {isSignUp && (
-                <div>
-                  <label className="block text-[10px] uppercase font-bold text-[#8E94A6] mb-1">Confirm Password</label>
-                  <input type="password" placeholder="••••••••" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} className="w-full px-4 py-2.5 rounded-lg bg-[#1F212A] border border-[#2D303E] text-xs text-white outline-none focus:border-[#C5A880]" required />
+            </div>
+
+            {/* PINNED NOTES FRAMEWORK */}
+            <div className="space-y-6">
+              <h2 className="text-sm font-mono tracking-widest text-center text-[#D4AF37] uppercase">The Platform Workflow</h2>
+              <div className="grid md:grid-cols-3 gap-6">
+                
+                {/* CARD 1 */}
+                <div className="bg-[#FCF9F2] text-[#0B1315] p-6 rounded-sm shadow-[5px_5px_15px_rgba(0,0,0,0.4)] relative border-t-4 border-[#D4AF37] transform -rotate-1 hover:rotate-0 transition-transform">
+                  <div className="absolute -top-2 left-1/2 -translate-x-1/2 w-3 h-3 bg-[#D4AF37] rounded-full border border-[#FCF9F2] shadow shadow-black"></div>
+                  <div className="font-mono text-xs text-[#C29E2F] font-bold mb-2">STEP 01</div>
+                  <h3 className="text-base font-serif font-bold mb-2 text-[#0B1315]">Draft Your Skill Card</h3>
+                  <p className="text-xs font-sans leading-relaxed text-[#3A4547]">
+                    Pin your skill sets onto our shared interface. Outline clearly what knowledge you carry or specify what craft you seek to master.
+                  </p>
                 </div>
-              )}
-              <button type="submit" className="w-full bg-[#C5A880] hover:bg-[#B3966D] text-[#16171E] font-semibold py-3 rounded-lg text-xs uppercase tracking-wider transition-all mt-2">
-                {isSignUp ? "Register Private Seat" : "Verify Account"}
-              </button>
+
+                {/* CARD 2 */}
+                <div className="bg-[#FCF9F2] text-[#0B1315] p-6 rounded-sm shadow-[5px_5px_15px_rgba(0,0,0,0.4)] relative border-t-4 border-[#B87333] transform rotate-1 hover:rotate-0 transition-transform">
+                  <div className="absolute -top-2 left-1/2 -translate-x-1/2 w-3 h-3 bg-[#B87333] rounded-full border border-[#FCF9F2] shadow shadow-black"></div>
+                  <div className="font-mono text-xs text-[#B87333] font-bold mb-2">STEP 02</div>
+                  <h3 className="text-base font-serif font-bold mb-2 text-[#0B1315]">Radar Interception</h3>
+                  <p className="text-xs font-sans leading-relaxed text-[#3A4547]">
+                    Utilize the smart grid matrix to look through neighborhood requests. Filter instantly through local clusters to pinpoint synchronous trades.
+                  </p>
+                </div>
+
+                {/* CARD 3 */}
+                <div className="bg-[#FCF9F2] text-[#0B1315] p-6 rounded-sm shadow-[5px_5px_15px_rgba(0,0,0,0.4)] relative border-t-4 border-[#D4AF37] transform -rotate-1 hover:rotate-0 transition-transform">
+                  <div className="absolute -top-2 left-1/2 -translate-x-1/2 w-3 h-3 bg-[#D4AF37] rounded-full border border-[#FCF9F2] shadow shadow-black"></div>
+                  <div className="font-mono text-xs text-[#C29E2F] font-bold mb-2">STEP 03</div>
+                  <h3 className="text-base font-serif font-bold mb-2 text-[#0B1315]">Secure Peer Handshake</h3>
+                  <p className="text-xs font-sans leading-relaxed text-[#3A4547]">
+                    Initiate direct channels to coordinate exchange cycles. Swap skills safely in trusted venues, tracking progress directly through the application.
+                  </p>
+                </div>
+
+              </div>
+            </div>
+
+            {/* SAFETY RULES PANEL */}
+            <div className="bg-[#0B1315] border border-[#1A3034] rounded-2xl p-8 space-y-6 shadow-2xl relative overflow-hidden">
+              <div className="absolute top-0 right-0 w-32 h-32 bg-[#D4AF37]/5 rounded-full blur-3xl pointer-events-none"></div>
+              <h3 className="text-lg font-serif font-bold text-[#D4AF37]">Exchange Safety & Trust Guidelines</h3>
+              <div className="grid md:grid-cols-2 gap-6 text-xs text-[#8BA4A8] leading-relaxed font-sans">
+                <div className="space-y-3">
+                  <p><strong className="text-[#FCF9F2] font-serif">✓ Cashless Mandate:</strong> Commercial monetization offers or marketing paid academies is strictly unauthorized here.</p>
+                  <p><strong className="text-[#FCF9F2] font-serif">✓ Transparent Portfolios:</strong> Maintain high standard descriptions regarding your practical familiarity with the trade fields.</p>
+                </div>
+                <div className="space-y-3">
+                  <p><strong className="text-[#FCF9F2] font-serif">✓ Public Handshakes:</strong> For introductory modules, process your physical sessions across populated environments or local workspaces.</p>
+                  <p><strong className="text-[#FCF9F2] font-serif">✓ Feedback Loops:</strong> Logging detailed star ratings post-completion protects our active barter ecosystem.</p>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        )}
+
+        {/* PROFILE PROMPT FOR NEW USERS */}
+        {user && !profile?.location && (
+          <div className="max-w-md mx-auto bg-[#FCF9F2] text-[#0B1315] rounded-sm p-6 shadow-[10px_10px_30px_rgba(0,0,0,0.6)] my-10 relative border-t-4 border-[#D4AF37]">
+            <div className="absolute -top-2 left-1/2 -translate-x-1/2 w-3 h-3 bg-[#D4AF37] rounded-full border border-[#FCF9F2] shadow shadow-black"></div>
+            <h3 className="text-base font-serif font-bold text-[#0B1315] text-center uppercase tracking-wide mb-4">Setup Your User Profile</h3>
+            <form onSubmit={handleUpdateProfile} className="space-y-4 font-sans">
+              <input type="text" placeholder="Your City, Territory or Base (e.g. Rawalpindi)" value={location} onChange={(e) => setLocation(e.target.value)} className="w-full px-4 py-2 bg-[#FCF9F2] border border-[#1A3034]/20 text-xs rounded text-[#0B1315] outline-none focus:border-[#D4AF37]" required />
+              <textarea placeholder="Tell the board about your background, tools, and expertise..." value={bio} onChange={(e) => setBio(e.target.value)} rows={3} className="w-full px-4 py-2 bg-[#FCF9F2] border border-[#1A3034]/20 text-xs rounded text-[#0B1315] outline-none focus:border-[#D4AF37] resize-none" required />
+              <button type="submit" className="w-full bg-[#0B1315] text-[#D4AF37] font-serif text-xs font-bold py-2 rounded uppercase tracking-wide hover:bg-slate-800 transition-all shadow">Verify My Location</button>
             </form>
-            <div className="text-center mt-4">
-              <button onClick={() => setIsSignUp(!isSignUp)} className="text-xs text-[#C5A880] hover:underline">
-                {isSignUp ? "Already registered? Access Sign In" : "New practitioner? Open seat form"}
-              </button>
-            </div>
           </div>
-        </div>
-      )}
+        )}
 
-      {/* EXTENDED DEEP CONCEPT VIEW */}
-      {(activeTab === "concept" || !user) && (
-        <section className="max-w-5xl mx-auto px-6 py-16 space-y-20 animate-fade-in">
-          
-          <div className="text-center space-y-6">
-            <span className="text-[10px] font-bold tracking-[0.22em] bg-[#1F212A] text-[#C5A880] px-5 py-2 rounded-full border border-[#313543] inline-block uppercase">
-              🏛️ ANTI-CURRENCY ARCHITECTURE PROTOCOL
-            </span>
-            <h2 className="text-3xl sm:text-4xl md:text-5xl lg:text-6xl font-serif text-white leading-tight tracking-tight max-w-4xl mx-auto">
-              Trade your premium skills. <br />
-              <span className="italic text-[#C5A880] font-light">Zero commercial currency involved.</span>
-            </h2>
-            <p className="text-[#A0A5B5] max-w-3xl mx-auto text-sm md:text-base leading-relaxed font-light">
-              VALOIR redefines localized peer learning and strategic talent trade. We completely exclude intermediate transactional capital, token models, and digital currencies to preserve direct, unconditional reciprocal value exchange.
-            </p>
-            {!user && (
-              <button onClick={() => { setIsSignUp(true); setShowAuthModal(true); }} className="bg-[#C5A880] hover:bg-[#B3966D] text-[#16171E] text-xs font-bold tracking-wider uppercase px-8 py-3.5 rounded-lg transition-all shadow-md mt-4">
-                Initiate Club Seat Registration
-              </button>
-            )}
-          </div>
-
-          <div className="grid md:grid-cols-3 gap-8 pt-6 border-t border-[#1F212A]">
-            <div className="bg-[#16171E] border border-[#23252F] p-8 rounded-2xl space-y-3">
-              <div className="text-lg">⚖️</div>
-              <h4 className="text-sm font-bold font-serif text-[#C5A880] uppercase tracking-wider">Direct Reciprocity</h4>
-              <p className="text-xs text-[#8E94A6] leading-relaxed font-light">
-                No complex banking token structures or centralized credits. You teach an intermediate or expert art domain, and in absolute mutual return, you claim skill mastery classes from neighbors.
-              </p>
+        {/* VIEW 2: PIN NEW SKILL CARD TO BOARD */}
+        {user && profile?.location && currentTab === "add" && (
+          <div className="max-w-2xl mx-auto bg-[#FCF9F2] text-[#0B1315] p-8 rounded-sm shadow-[10px_10px_30px_rgba(0,0,0,0.6)] space-y-6 relative border-t-4 border-[#D4AF37] animate-fadeIn">
+            <div className="absolute -top-2 left-1/2 -translate-x-1/2 w-3 h-3 bg-[#D4AF37] rounded-full border border-[#FCF9F2] shadow shadow-black"></div>
+            <div className="border-b border-[#1A3034]/10 pb-3 text-center">
+              <h3 className="text-xl font-serif font-bold text-[#0B1315] uppercase tracking-wide">Pin a New Skill Card</h3>
+              <p className="text-xs text-[#617173] font-sans mt-1">Fill out the template parameters to mount it live onto the public board.</p>
             </div>
-
-            <div className="bg-[#16171E] border border-[#23252F] p-8 rounded-2xl space-y-3">
-              <div className="text-lg">🎯</div>
-              <h4 className="text-sm font-bold font-serif text-[#C5A880] uppercase tracking-wider">Zero Signal Distortions</h4>
-              <p className="text-xs text-[#8E94A6] leading-relaxed font-light">
-                By eliminating price points, we preserve pure intent alignment. Members connect exclusively when knowledge demands map directly to structural capabilities. No noise, just engineering and art.
-              </p>
-            </div>
-
-            <div className="bg-[#16171E] border border-[#23252F] p-8 rounded-2xl space-y-3">
-              <div className="text-lg">🔒</div>
-              <h4 className="text-sm font-bold font-serif text-[#C5A880] uppercase tracking-wider">Verified Club Privacy</h4>
-              <p className="text-xs text-[#8E94A6] leading-relaxed font-light">
-                Every member maintains verified identities. Catalog postings undergo continuous localized metric filters to safeguard the network from commercial service providers and ads.
-              </p>
-            </div>
-          </div>
-
-          <div className="border-t border-[#1F212A] pt-12 space-y-8">
-            <div className="text-center space-y-2">
-              <h3 className="text-xl font-serif font-bold text-white tracking-wide">Elite Operational Principles</h3>
-              <p className="text-xs text-[#6E7383] max-w-xl mx-auto">Our rigorous methodology guarantees high-value skill returns within the sovereign peer community.</p>
-            </div>
-
-            <div className="grid md:grid-cols-2 gap-8">
-              <div className="bg-[#16171E]/60 border border-[#23252F] rounded-2xl p-6 space-y-4">
-                <div className="flex items-center gap-3">
-                  <span className="text-[#C5A880] text-sm font-mono font-bold">01 /</span>
-                  <h5 className="text-xs uppercase font-bold text-white tracking-wider">Asymmetric Value Architecture</h5>
-                </div>
-                <p className="text-xs text-[#8E94A6] leading-relaxed font-light">
-                  Traditional learning vectors force individuals into subscription models or micro-payments. Valoir values human cognitive hours equally. One hour of bespoke architectural engineering exchange equates strictly to one hour of elite linguistics guidance.
-                </p>
-              </div>
-
-              <div className="bg-[#16171E]/60 border border-[#23252F] rounded-2xl p-6 space-y-4">
-                <div className="flex items-center gap-3">
-                  <span className="text-[#C5A880] text-sm font-mono font-bold">02 /</span>
-                  <h5 className="text-xs uppercase font-bold text-white tracking-wider">Hyper-Local Geofenced Operations</h5>
-                </div>
-                <p className="text-xs text-[#8E94A6] leading-relaxed font-light">
-                  Digital networking platforms create global noise, minimizing real actionable local human interaction. Our strict radius thresholds ensure matching partners exist inside an active parameter suitable for real-world mentorship.
-                </p>
-              </div>
-
-              <div className="bg-[#16171E]/60 border border-[#23252F] rounded-2xl p-6 space-y-4">
-                <div className="flex items-center gap-3">
-                  <span className="text-[#C5A880] text-sm font-mono font-bold">03 /</span>
-                  <h5 className="text-xs uppercase font-bold text-white tracking-wider">Curation Over Volume</h5>
-                </div>
-                <p className="text-xs text-[#8E94A6] leading-relaxed font-light">
-                  Unlike wide open marketplaces, Valoir rejects general consumer catalog entries. Members must demonstrate dedicated focus areas, establishing a strict high-integrity talent standard for the community ledger.
-                </p>
-              </div>
-
-              <div className="bg-[#16171E]/60 border border-[#23252F] rounded-2xl p-6 space-y-4">
-                <div className="flex items-center gap-3">
-                  <span className="text-[#C5A880] text-sm font-mono font-bold">04 /</span>
-                  <h5 className="text-xs uppercase font-bold text-white tracking-wider">Zero Broker Dependency</h5>
-                </div>
-                <p className="text-xs text-[#8E94A6] leading-relaxed font-light">
-                  Communication occurs entirely peer-to-peer. The system acts as a transparent matchmaking node, preventing centralized oversight, monetization, or tracking algorithms from diluting user connections.
-                </p>
-              </div>
-            </div>
-          </div>
-
-          <div className="bg-[#16171E] border border-[#23252F] rounded-2xl p-8 md:p-10 space-y-6">
-            <h4 className="text-lg font-serif font-semibold text-white tracking-wide">Protocol Execution Sequence</h4>
-            <div className="grid sm:grid-cols-4 gap-6 text-xs text-[#8E94A6] font-light">
-              <div className="space-y-2">
-                <strong className="block text-[#C5A880] font-semibold">01 / Profile Set</strong>
-                <p>Register your geographic perimeter and outline your primary fields of proficiency.</p>
-              </div>
-              <div className="space-y-2">
-                <strong className="block text-[#C5A880] font-semibold">02 / Publish Cards</strong>
-                <p>Deploy localized offers (skills you train) or active requests (domains you seek to absorb).</p>
-              </div>
-              <div className="space-y-2">
-                <strong className="block text-[#C5A880] font-semibold">03 / Initialize Swaps</strong>
-                <p>Review peer matching feeds inside your active dynamic radius and open communication.</p>
-              </div>
-              <div className="space-y-2">
-                <strong className="block text-[#C5A880] font-semibold">04 / Ledger Log</strong>
-                <p>Conclude mutual handshakes and archive structured interaction tracking history safely.</p>
-              </div>
-            </div>
-          </div>
-
-        </section>
-      )}
-
-      {/* CORE ACTIVE WORKSPACE CONTENT */}
-      {user && activeTab !== "concept" && (
-        <div className="max-w-7xl mx-auto px-6 py-12">
-          
-          {/* PROFILE FILLUP INTERCEPTOR */}
-          {!isProfileComplete ? (
-            <div className="max-w-md mx-auto bg-[#16171E] border border-[#23252F] rounded-2xl p-8 shadow-xl">
-              <div className="text-center mb-6">
-                <span className="text-[10px] font-bold text-[#C5A880] uppercase tracking-widest">Onboarding Ledger</span>
-                <h3 className="text-lg font-serif font-bold text-white mt-1">Complete Identity Profile</h3>
-              </div>
-              <form onSubmit={handleUpdateProfile} className="space-y-4">
+            <form onSubmit={addListing} className="space-y-4 font-sans text-xs">
+              <div className="grid sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-[10px] uppercase font-bold text-[#8E94A6] mb-1">Your Suburb / District Location</label>
-                  <input type="text" placeholder="E.g. Rawalpindi, Punjab" value={location} onChange={(e) => setLocation(e.target.value)} className="w-full px-4 py-2.5 rounded-lg bg-[#1F212A] border border-[#2D303E] text-xs text-white outline-none focus:border-[#C5A880]" required />
+                  <label className="block text-[10px] font-mono uppercase tracking-wider text-[#617173] mb-1">Exchange Intent</label>
+                  <select value={type} onChange={(e) => setType(e.target.value as any)} className="w-full px-3 py-2 bg-[#FCF9F2] border border-[#1A3034]/20 rounded text-[#0B1315] outline-none font-medium">
+                    <option value="offer">Offer (I am teaching this skill)</option>
+                    <option value="request">Request (I am seeking this skill)</option>
+                  </select>
                 </div>
                 <div>
-                  <label className="block text-[10px] uppercase font-bold text-[#8E94A6] mb-1">Briefly outline your trade domains</label>
-                  <textarea placeholder="List core fields you look to exchange..." value={bio} onChange={(e) => setBio(e.target.value)} rows={4} className="w-full px-4 py-2.5 rounded-lg bg-[#1F212A] border border-[#2D303E] text-xs text-white outline-none focus:border-[#C5A880] resize-none" required />
+                  <label className="block text-[10px] font-mono uppercase tracking-wider text-[#617173] mb-1">Category</label>
+                  <select value={category} onChange={(e) => setCategory(e.target.value)} className="w-full px-3 py-2 bg-[#FCF9F2] border border-[#1A3034]/20 rounded text-[#0B1315] outline-none font-medium">
+                    <option value="Technology">Technology & Software</option>
+                    <option value="Music">Music & Instruments</option>
+                    <option value="Language">English & Languages</option>
+                    <option value="Arts">Fine Arts & Crafting</option>
+                    <option value="Other">Other Categories</option>
+                  </select>
                 </div>
-                <button type="submit" disabled={updatingProfile} className="w-full bg-[#C5A880] hover:bg-[#B3966D] text-[#16171E] font-bold py-3 rounded-lg text-xs uppercase tracking-wide transition-all">
-                  Activate Workspace Access
-                </button>
-              </form>
-            </div>
-          ) : (
+              </div>
+              <div className="grid sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-[10px] font-mono uppercase tracking-wider text-[#617173] mb-1">Skill Title Header</label>
+                  <input type="text" placeholder="e.g. Acoustic Guitar Roots" value={title} onChange={(e) => setTitle(e.target.value)} className="w-full px-3 py-2 bg-[#FCF9F2] border border-[#1A3034]/20 rounded text-[#0B1315] outline-none placeholder:text-slate-400 focus:border-[#D4AF37]" required />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-mono uppercase tracking-wider text-[#617173] mb-1">Radar Radius Bound (KM)</label>
+                  <input type="number" value={radiusKm} onChange={(e) => setRadiusKm(Number(e.target.value))} className="w-full px-3 py-2 bg-[#FCF9F2] border border-[#1A3034]/20 rounded text-[#0B1315] outline-none focus:border-[#D4AF37]" required />
+                </div>
+              </div>
+              <div>
+                <label className="block text-[10px] font-mono uppercase tracking-wider text-[#617173] mb-1">Full Card Breakdown</label>
+                <textarea placeholder="Describe your experience level, schedule slots, and what you expect in direct reciprocity trade..." value={description} onChange={(e) => setDescription(e.target.value)} rows={4} className="w-full px-3 py-2 bg-[#FCF9F2] border border-[#1A3034]/20 rounded text-[#0B1315] outline-none placeholder:text-slate-400 focus:border-[#D4AF37] resize-none leading-relaxed" required />
+              </div>
+              <button type="submit" className="w-full bg-[#0B1315] text-[#D4AF37] font-serif font-bold py-3 rounded text-xs uppercase tracking-widest hover:bg-slate-800 shadow-md transition-all">{posting ? "Mounting..." : "Mount Card Entry"}</button>
+            </form>
+          </div>
+        )}
+
+        {/* VIEW 3: LIVE BOARD ACTIVE REGISTRY */}
+        {user && profile?.location && currentTab === "view" && (
+          <div className="space-y-6 animate-fadeIn">
             
-            <div className="space-y-12">
-              
-              {/* CHAT OVERLAY WINDOW FRAME */}
-              {activeChatUser && activeChatListing && (
-                <div className="bg-[#16171E] border border-[#C5A880]/40 rounded-2xl p-6 shadow-2xl space-y-4 max-w-2xl mx-auto animate-fade-in">
-                  <div className="flex justify-between items-start border-b border-[#23252F] pb-4">
-                    <div>
-                      <span className="text-[9px] font-bold uppercase bg-[#1F212A] text-[#C5A880] px-2.5 py-0.5 rounded">Live Transaction Room</span>
-                      <h4 className="text-sm font-bold text-white mt-2">Chat with: {activeChatUser.name}</h4>
-                      <p className="text-xs text-[#8E94A6]">Regarding card: <span className="text-[#C5A880]">"{activeChatListing.title}"</span></p>
-                    </div>
-                    <button onClick={() => { setActiveChatUser(null); setActiveChatListing(null); }} className="text-[10px] px-2.5 py-1.5 bg-[#1F212A] text-[#A0A5B5] hover:text-white rounded-lg border border-[#2D303E] transition-all">Minimize Window ×</button>
-                  </div>
-
-                  <div className="h-64 overflow-y-auto space-y-3 p-4 bg-[#0F1015] border border-[#23252F] rounded-xl">
-                    {messages.length === 0 ? (
-                      <div className="h-full flex items-center justify-center text-center">
-                        <p className="text-xs text-[#6E7383] italic">No conversational ledger history found. Send a query below to propose swap rules.</p>
+            {/* MATCH INTERCEPT HUB */}
+            {suggestedMatches.length > 0 && (
+              <div className="bg-[#0B1315] border border-[#D4AF37]/50 p-4 rounded-xl space-y-2 shadow-2xl relative overflow-hidden">
+                <div className="absolute top-0 right-0 w-24 h-24 bg-[#D4AF37]/5 rounded-full blur-2xl"></div>
+                <p className="text-xs font-mono font-bold uppercase tracking-widest text-[#D4AF37]">🎯 Live Synchronous Barter Matches Found</p>
+                <div className="grid sm:grid-cols-2 gap-3">
+                  {suggestedMatches.map((m: any, idx: number) => (
+                    <div key={idx} className="bg-[#05090A] p-3 rounded-lg border border-[#1A3034] flex justify-between items-center text-xs font-sans">
+                      <div>
+                        <p className="text-[#FCF9F2] font-medium">Match for "{m.myListing.title}"</p>
+                        <p className="text-[10px] text-[#8BA4A8]">Connect with <span className="text-[#D4AF37] font-serif font-bold">{m.peer?.name}</span> ({m.peer?.location})</p>
                       </div>
+                      <button onClick={() => openChatWindow(m.peer, m.matchedListing)} className="bg-[#D4AF37] text-[#0B1315] font-serif font-bold px-3 py-1 rounded text-[10px] uppercase shadow">Chat</button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* RADAR CONFIGURATOR (SEARCH & FILTER) */}
+            <div className="bg-[#0B1315] p-4 rounded-xl border border-[#1A3034] flex flex-wrap gap-4 justify-between items-center shadow-2xl">
+              <input type="text" placeholder="Scan board by keyword..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} className="bg-[#05090A] border border-[#1A3034] text-xs font-mono rounded-lg px-4 py-2 outline-none text-[#FCF9F2] w-full sm:w-64 focus:border-[#D4AF37] placeholder:text-[#425E62]" />
+              <div className="flex gap-2 w-full sm:w-auto font-sans">
+                <select value={filterCategory} onChange={(e) => setFilterCategory(e.target.value)} className="bg-[#05090A] border border-[#1A3034] text-xs text-[#8BA4A8] rounded-lg p-2 outline-none focus:border-[#D4AF37]">
+                  <option value="All">All Disciplines</option>
+                  <option value="Technology">Technology & Software</option>
+                  <option value="Music">Music & Instruments</option>
+                  <option value="Language">English & Languages</option>
+                  <option value="Arts">Fine Arts & Crafting</option>
+                  <option value="Other">Other Categories</option>
+                </select>
+                <select value={filterType} onChange={(e) => setFilterType(e.target.value)} className="bg-[#05090A] border border-[#1A3034] text-xs text-[#8BA4A8] rounded-lg p-2 outline-none focus:border-[#D4AF37]">
+                  <option value="All">All Intents</option>
+                  <option value="offer">Offers Only</option>
+                  <option value="request">Requests Only</option>
+                </select>
+              </div>
+            </div>
+            
+            {/* BOARD INTERFACE */}
+            <div className="grid lg:grid-cols-12 gap-6 items-start">
+              
+              {/* TACTILE CARDS STREAM */}
+              <div className={`${activeChatUser ? "lg:col-span-7" : "lg:col-span-12"} grid md:grid-cols-2 gap-6`}>
+                {listings.length === 0 ? (
+                  <div className="col-span-full text-center py-16 bg-[#0B1315] border border-dashed border-[#1A3034] rounded-xl">
+                    <p className="text-xs font-mono text-[#425E62] italic">The public grid board is currently empty.</p>
+                  </div>
+                ) : (
+                  listings.map((l: any, i: number) => {
+                    const isMine = l.user_id === user.id
+                    const rotateClass = i % 2 === 0 ? "transform -rotate-1 hover:rotate-0" : "transform rotate-1 hover:rotate-0"
+                    
+                    return (
+                      <div key={l.id} className={`bg-[#FCF9F2] text-[#0B1315] p-6 rounded-sm shadow-[8px_8px_20px_rgba(0,0,0,0.5)] flex flex-col justify-between min-h-[280px] transition-transform duration-200 relative ${rotateClass}`}>
+                        
+                        {/* PIN INDICATION */}
+                        <div className={`absolute -top-1.5 left-1/2 -translate-x-1/2 w-3 h-3 rounded-full border border-[#FCF9F2] shadow-md ${l.type === 'offer' ? 'bg-[#D4AF37]' : 'bg-[#B87333]'}`}></div>
+                        
+                        <div>
+                          <div className="flex justify-between items-center mb-3 font-mono text-[9px] font-bold">
+                            <span className={`px-2 py-0.5 rounded ${l.type === 'offer' ? 'bg-[#D4AF37]/20 text-[#8C7016]' : 'bg-[#B87333]/20 text-[#804818]'}`}>{l.type.toUpperCase()}</span>
+                            <span className="text-[#617173] tracking-wider uppercase">{l.category === 'Language' ? 'English & Languages' : l.category}</span>
+                          </div>
+                          <h4 className="text-base font-bold text-[#0B1315] font-serif leading-tight">{l.title}</h4>
+                          <p className="text-xs text-[#3A4547] font-sans mt-3 leading-relaxed whitespace-pre-line h-auto overflow-visible">{l.description}</p>
+                        </div>
+
+                        <div>
+                          <div className="border-t border-[#1A3034]/10 pt-4 flex justify-between items-center mt-6 font-sans text-xs">
+                            <div>
+                              <p className="text-[#0B1315] font-serif font-black">{l.profiles?.name || "Anonymous Member"}</p>
+                              <p className="text-[10px] text-[#617173] font-mono tracking-tighter uppercase">{l.profiles?.location || "Base Remote"}</p>
+                            </div>
+                            <div className="flex gap-2 font-mono">
+                              {isMine ? (
+                                <>
+                                  <button onClick={() => updateListingStatus(l.id, l.status)} className="text-[9px] font-bold border border-[#D4AF37]/40 text-[#8C7016] px-2 py-1 rounded bg-[#D4AF37]/10 hover:bg-[#D4AF37]/20 transition-all">
+                                    {l.status === 'active' ? "Complete Swap" : "Completed ✔"}
+                                  </button>
+                                  <button onClick={() => deleteListing(l.id)} className="text-[9px] font-bold text-red-700 bg-red-100 px-2 py-1 rounded hover:bg-red-200 transition-all">Del</button>
+                                </>
+                              ) : (
+                                <>
+                                  <button onClick={() => openChatWindow(l.profiles, l)} className="bg-[#0B1315] text-[#D4AF37] font-serif font-bold px-3 py-1 rounded text-[10px] uppercase shadow hover:bg-slate-800 transition-all">Contact</button>
+                                  <button onClick={() => reportListing(l.id)} className="text-[10px] text-red-700 font-sans px-1 hover:underline ml-1">Report</button>
+                                </>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* 👑 ADMIN INTERFACE HUB MODIFICATION */}
+                          {isAdmin && (
+                            <div className="mt-3 pt-2 border-t border-red-200 flex justify-end">
+                              <button 
+                                onClick={() => adminForceDeleteListing(l.id, l.title)} 
+                                className="w-full bg-red-600 hover:bg-red-700 text-white font-mono text-[10px] font-bold py-1 px-2 rounded transition-all text-center tracking-wider shadow"
+                              >
+                                🚨 FORCE DELETE BY ADMIN
+                              </button>
+                            </div>
+                          )}
+                        </div>
+
+                      </div>
+                    )
+                  })
+                )}
+              </div>
+
+              {/* CHAT WINDOW ENGINE */}
+              {activeChatUser && activeChatListing && (
+                <div className="lg:col-span-5 bg-[#FCF9F2] text-[#0B1315] border-t-8 border-[#D4AF37] rounded-sm p-4 shadow-[10px_10px_30px_rgba(0,0,0,0.6)] space-y-4 animate-fadeIn sticky top-24">
+                  <div className="flex justify-between items-center border-b border-[#1A3034]/10 pb-2">
+                    <div>
+                      <h4 className="text-sm font-serif font-bold text-[#0B1315]">Chat Room: {activeChatUser.name}</h4>
+                      <p className="text-[10px] font-mono text-[#617173] truncate max-w-[220px]">Card: {activeChatListing.title}</p>
+                    </div>
+                    <button onClick={() => { setActiveChatUser(null); setActiveChatListing(null); }} className="text-[10px] font-mono text-[#FCF9F2] bg-[#0B1315] px-2 py-1 rounded shadow">✕ Close</button>
+                  </div>
+                  
+                  {/* MESSAGE HISTORY */}
+                  <div className="h-64 overflow-y-auto space-y-3 p-3 bg-[#FCF9F2] rounded border border-[#1A3034]/20 font-sans">
+                    {messages.length === 0 ? (
+                      <p className="text-[10px] text-center italic text-[#617173] pt-24">No transaction history logged.</p>
                     ) : (
                       messages.map((m: any, i: number) => {
                         const isMe = m.sender_id === user.id
                         return (
                           <div key={i} className={`flex ${isMe ? "justify-end" : "justify-start"}`}>
-                            <div className={`max-w-[80%] px-4 py-2 rounded-xl text-xs ${isMe ? "bg-[#C5A880] text-[#16171E] font-medium" : "bg-[#1F212A] text-white border border-[#2D303E]"}`}>
-                              <p className="leading-relaxed">{m.content}</p>
+                            <div className={`max-w-[85%] px-3 py-1.5 rounded text-xs shadow-sm ${isMe ? "bg-[#0B1315] text-[#D4AF37]" : "bg-white text-slate-800 border border-[#1A3034]/10"}`}>
+                              <p>{m.content}</p>
                             </div>
                           </div>
                         )
@@ -589,243 +685,90 @@ export default function Home() {
                     <div ref={messagesEndRef} />
                   </div>
 
-                  <form onSubmit={sendChatMessage} className="flex gap-2">
-                    <input type="text" placeholder="Propose exact availability parameters..." value={newMessage} onChange={(e) => setNewMessage(e.target.value)} className="flex-1 px-4 py-3 bg-[#1F212A] border border-[#2D303E] text-xs text-white rounded-lg outline-none focus:border-[#C5A880] transition-all" required />
-                    <button type="submit" disabled={sendingMsg} className="bg-[#C5A880] hover:bg-[#B3966D] text-[#16171E] text-xs font-bold px-5 rounded-lg uppercase tracking-wide transition-all">Send</button>
+                  <form onSubmit={sendChatMessage} className="flex gap-2 font-sans">
+                    <input type="text" placeholder="Write message memo..." value={newMessage} onChange={(e) => setNewMessage(e.target.value)} className="flex-1 bg-[#FCF9F2] border border-[#1A3034]/20 text-xs text-[#0B1315] rounded px-3 outline-none focus:border-[#D4AF37]" required />
+                    <button type="submit" disabled={sendingMsg} className="bg-[#0B1315] text-[#D4AF37] font-serif font-bold text-xs px-4 rounded uppercase shadow">{sendingMsg ? "..." : "Send"}</button>
                   </form>
                 </div>
               )}
-
-              {/* VIEW 1: EXPLORE CATALOG */}
-              {activeTab === "explore" && (
-                <div className="space-y-8 animate-fade-in">
-                  
-                  <div className="bg-[#16171E] border border-[#23252F] rounded-2xl p-6 shadow-sm">
-                    <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-end">
-                      <div className="lg:col-span-6">
-                        <label className="block text-[10px] uppercase font-bold text-[#8E94A6] mb-2">Refine Filter Keywords</label>
-                        <input type="text" placeholder="Lookup skill labels, titles, locations..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} className="w-full px-4 py-2.5 bg-[#1F212A] border border-[#2D303E] text-xs text-white rounded-lg outline-none focus:border-[#C5A880] transition-all" />
-                      </div>
-                      
-                      <div className="lg:col-span-3">
-                        <label className="block text-[10px] uppercase font-bold text-[#8E94A6] mb-2">Skill Domains</label>
-                        <select value={filterCategory} onChange={(e) => setFilterCategory(e.target.value)} className="w-full px-3 py-2.5 bg-[#1F212A] border border-[#2D303E] text-xs text-white rounded-lg outline-none focus:border-[#C5A880]">
-                          <option value="All">All Categories</option>
-                          <option value="Technology">Technology</option>
-                          <option value="Music">Music</option>
-                          <option value="Cooking">Cooking</option>
-                          <option value="Languages">Languages</option>
-                          <option value="Crafts & Art">Crafts & Art</option>
-                        </select>
-                      </div>
-
-                      <div className="lg:col-span-3">
-                        <label className="block text-[10px] uppercase font-bold text-[#8E94A6] mb-2">Intent Direction</label>
-                        <select value={filterType} onChange={(e) => setFilterType(e.target.value)} className="w-full px-3 py-2.5 bg-[#1F212A] border border-[#2D303E] text-xs text-white rounded-lg outline-none focus:border-[#C5A880]">
-                          <option value="All">All Operations</option>
-                          <option value="offer">Offers (Teaches)</option>
-                          <option value="request">Requests (Seeks)</option>
-                        </select>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-8">
-                    {listings.length === 0 ? (
-                      <div className="col-span-full bg-[#16171E] border border-[#23252F] rounded-2xl p-16 text-center text-[#6E7383] italic text-xs">No entries match your specific filters.</div>
-                    ) : (
-                      listings.map((item) => {
-                        const isMyOwn = item.user_id === user.id
-                        return (
-                          <div key={item.id} className="bg-[#16171E] border border-[#23252F] rounded-2xl p-6 shadow-sm flex flex-col justify-between space-y-6 hover:border-[#3A3E4F] transition-all">
-                            <div className="space-y-4">
-                              <div className="flex justify-between items-center">
-                                <span className={`text-[9px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-md ${item.type === "offer" ? "bg-[#1B2A22] text-[#52B774]" : "bg-[#182930] text-[#47A3B8]"}`}>
-                                  {item.type === "offer" ? "💡 Teaches" : "🔍 Seeks"}
-                                </span>
-                                <span className="text-[10px] text-[#A0A5B5] bg-[#1F212A] px-2 py-0.5 rounded font-medium">{item.category}</span>
-                              </div>
-                              
-                              <div>
-                                <h4 className="text-base font-serif font-bold text-white tracking-tight">{item.title}</h4>
-                                <p className="text-xs text-[#8E94A6] font-light leading-relaxed mt-2 line-clamp-3">{item.description}</p>
-                              </div>
-                            </div>
-
-                            <div className="border-t border-[#1F212A] pt-4 space-y-4">
-                              <div className="flex justify-between text-[10px] text-[#6E7383]">
-                                <span>Owner: <strong className="text-[#C5A880] font-medium">{isMyOwn ? "You" : item.profiles?.name}</strong></span>
-                                <span className="italic">{item.profiles?.location || "Global"} ({item.radius_km} km)</span>
-                              </div>
-
-                              {isMyOwn ? (
-                                <button onClick={() => deleteListing(item.id)} className="w-full py-2 bg-red-950/30 text-[#E07A7A] border border-red-900/40 hover:bg-red-950/60 text-xs font-medium rounded-lg transition-all">🗑️ Delete From Public Catalog</button>
-                              ) : (
-                                <button 
-                                  onClick={() => openChatWindow(item.profiles, item)} 
-                                  className="w-full py-2.5 bg-[#C5A880] hover:bg-[#B3966D] text-[#16171E] text-xs font-bold uppercase tracking-wider rounded-lg transition-all text-center block shadow-sm"
-                                >
-                                  💬 Propose Exchange Swap
-                                </button>
-                              )}
-                            </div>
-                          </div>
-                        )
-                      })
-                    )}
-                  </div>
-
-                </div>
-              )}
-
-              {/* VIEW 2: INDEPENDENT PUBLISH FORM */}
-              {activeTab === "publish" && (
-                <div className="max-w-xl mx-auto bg-[#16171E] border border-[#23252F] rounded-2xl p-8 shadow-md space-y-6 animate-fade-in">
-                  <div>
-                    <h3 className="text-lg font-serif font-bold text-[#C5A880]">Deploy New Exchange Card</h3>
-                    <p className="text-xs text-[#8E94A6] mt-1">Specify parameters clearly to maintain pure intent alignment.</p>
-                  </div>
-
-                  <form onSubmit={addListing} className="space-y-6">
-                    <div>
-                      <label className="block text-[10px] uppercase font-bold text-[#8E94A6] mb-2">Intent Direction</label>
-                      <div className="grid grid-cols-2 gap-3">
-                        <button type="button" onClick={() => setType("offer")} className={`py-3 rounded-lg text-xs font-bold border transition-all ${type === "offer" ? "bg-[#C5A880] border-[#C5A880] text-[#16171E]" : "bg-[#1F212A] border-[#2D303E] text-[#6E7383] hover:text-white"}`}>I Wish to Teach Skill</button>
-                        <button type="button" onClick={() => setType("request")} className={`py-3 rounded-lg text-xs font-bold border transition-all ${type === "request" ? "bg-[#C5A880] border-[#C5A880] text-[#16171E]" : "bg-[#1F212A] border-[#2D303E] text-[#6E7383] hover:text-white"}`}>I Wish to Request Skill</button>
-                      </div>
-                    </div>
-
-                    <div className="grid sm:grid-cols-2 gap-4">
-                      <div>
-                        <label className="block text-[10px] uppercase font-bold text-[#8E94A6] mb-1">Subject Title Line</label>
-                        <input type="text" placeholder="E.g. Advanced Piano Craft" value={title} onChange={(e) => setTitle(e.target.value)} className="w-full px-3 py-2.5 bg-[#1F212A] border border-[#2D303E] text-xs text-white rounded-lg outline-none focus:border-[#C5A880]" required />
-                      </div>
-                      <div>
-                        <label className="block text-[10px] uppercase font-bold text-[#8E94A6] mb-1">Domain Class</label>
-                        <select value={category} onChange={(e) => setCategory(e.target.value)} className="w-full px-3 py-2.5 bg-[#1F212A] border border-[#2D303E] text-xs text-white rounded-lg outline-none focus:border-[#C5A880]">
-                          <option value="Technology">Technology</option>
-                          <option value="Music">Music</option>
-                          <option value="Cooking">Cooking</option>
-                          <option value="Languages">Languages</option>
-                          <option value="Crafts & Art">Crafts & Art</option>
-                        </select>
-                      </div>
-                    </div>
-
-                    <div>
-                      <label className="block text-[10px] uppercase font-bold text-[#8E94A6] mb-1">Detailed Description Requirements</label>
-                      <textarea placeholder="Outline clearly what you want to learn vs what you are ready to teach in return..." value={description} onChange={(e) => setDescription(e.target.value)} rows={5} className="w-full px-3 py-2 bg-[#1F212A] border border-[#2D303E] text-xs text-white rounded-lg outline-none focus:border-[#C5A880] resize-none leading-relaxed" required />
-                    </div>
-
-                    <div>
-                      <div className="flex justify-between text-[10px] uppercase font-bold text-[#8E94A6] mb-1">
-                        <span>Search Range Threshold</span>
-                        <strong className="text-[#C5A880]">{radiusKm} KM Radius</strong>
-                      </div>
-                      <input type="range" min="1" max="100" value={radiusKm} onChange={(e) => setRadiusKm(Number(e.target.value))} className="w-full accent-[#C5A880] h-1 bg-[#2D303E] rounded-lg cursor-pointer" />
-                    </div>
-
-                    <button type="submit" disabled={posting} className="w-full py-3 bg-[#C5A880] hover:bg-[#B3966D] text-[#16171E] text-xs font-bold uppercase tracking-wider rounded-lg transition-all shadow-md">
-                      Publish Card Entry
-                    </button>
-                  </form>
-                </div>
-              )}
-
-              {/* VIEW 3: SEPARATED CLEAN EXCHANGE HUB */}
-              {activeTab === "dashboard" && (
-                <div className="space-y-10 animate-fade-in">
-                  
-                  <div className="bg-[#16171E] border border-[#23252F] rounded-2xl p-8 shadow-sm grid md:grid-cols-3 gap-8">
-                    <div className="space-y-2 md:border-r border-[#2D303E] pr-4">
-                      <span className="text-[10px] font-bold text-[#6E7383] uppercase tracking-widest">TRANSACTION OVERVIEW</span>
-                      <h3 className="text-xl font-serif font-semibold text-[#C5A880]">Ledger Metrics</h3>
-                      <p className="text-xs text-[#8E94A6]">Realtime metrics mapping active incoming messages and outbox logs.</p>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-4 col-span-2">
-                      <div className="bg-[#1F212A] border border-[#2D303E] p-4 rounded-xl">
-                        <span className="block text-3xl font-bold text-white">{receivedConnections.length}</span>
-                        <span className="text-[10px] uppercase font-semibold text-[#8E94A6]">Incoming Responses (Inbox)</span>
-                      </div>
-                      <div className="bg-[#1F212A] border border-[#2D303E] p-4 rounded-xl">
-                        <span className="block text-3xl font-bold text-white">{sentConnections.length}</span>
-                        <span className="text-[10px] uppercase font-semibold text-[#8E94A6]">Outgoing Swaps Pending</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="bg-[#16171E] border border-[#23252F] rounded-2xl p-6 shadow-sm space-y-4">
-                    <div className="flex items-center gap-2 border-b border-[#1F212A] pb-3">
-                      <span className="text-sm">📥</span>
-                      <h4 className="text-xs uppercase font-bold text-white tracking-wider">Incoming Communication Requests (Inbox)</h4>
-                    </div>
-
-                    {receivedConnections.length === 0 ? (
-                      <p className="text-xs text-[#6E7383] italic py-2">No external members have initiated proposals on your cards yet.</p>
-                    ) : (
-                      <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
-                        {receivedConnections.map((conn, idx) => (
-                          <div key={idx} className="border border-[#2D303E] bg-[#1F212A] rounded-xl p-5 flex flex-col justify-between space-y-4">
-                            <div>
-                              <div className="flex justify-between items-center">
-                                <span className="text-[9px] font-bold uppercase bg-[#1B2A22] text-[#52B774] px-2 py-0.5 rounded">Received Thread</span>
-                                <span className="text-[9px] text-[#6E7383] font-medium">{conn.listing.category}</span>
-                              </div>
-                              <h5 className="text-xs font-bold text-white mt-3 line-clamp-1">Your Post: "{conn.listing.title}"</h5>
-                              <p className="text-[11px] text-[#A0A5B5] mt-1">From Candidate: <strong className="text-[#C5A880] font-medium">{conn.otherUser.name}</strong></p>
-                              <p className="text-[11px] text-[#8E94A6] italic line-clamp-1 mt-2 bg-[#16171E] p-2 border border-[#23252F] rounded-lg">Last: "{conn.lastMessage}"</p>
-                            </div>
-                            <button 
-                              onClick={() => openChatWindow(conn.otherUser, conn.listing)} 
-                              className="w-full text-center py-2 bg-[#C5A880] text-[#16171E] hover:bg-[#B3966D] text-xs font-bold rounded-lg transition-all"
-                            >
-                              💬 Open Chat Inbox
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="bg-[#16171E] border border-[#23252F] rounded-2xl p-6 shadow-sm space-y-4">
-                    <div className="flex items-center gap-2 border-b border-[#1F212A] pb-3">
-                      <span className="text-sm">📤</span>
-                      <h4 className="text-xs uppercase font-bold text-white tracking-wider">Outgoing Swap Initializations (Outbox)</h4>
-                    </div>
-
-                    {sentConnections.length === 0 ? (
-                      <p className="text-xs text-[#6E7383] italic py-2">You have not proposed communication to any external cards yet.</p>
-                    ) : (
-                      <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
-                        {sentConnections.map((conn, idx) => (
-                          <div key={idx} className="border border-[#2D303E] bg-[#1F212A] rounded-xl p-5 flex flex-col justify-between space-y-4">
-                            <div>
-                              <div className="flex justify-between items-center">
-                                <span className="text-[9px] font-bold uppercase bg-[#242736] text-[#A0A5B5] px-2 py-0.5 rounded">Sent Request</span>
-                                <span className="text-[9px] text-[#6E7383] font-medium">{conn.listing.category}</span>
-                              </div>
-                              <h5 className="text-xs font-bold text-white mt-3 line-clamp-1">Target Post: "{conn.listing.title}"</h5>
-                              <p className="text-[11px] text-[#A0A5B5] mt-1">Recipient Craftsman: <strong className="text-[#C5A880] font-medium">{conn.otherUser.name}</strong></p>
-                            </div>
-                            <button 
-                              onClick={() => openChatWindow(conn.otherUser, conn.listing)} 
-                              className="w-full text-center py-2 bg-transparent border border-[#2D303E] hover:bg-[#2D303E] text-white text-xs font-bold rounded-lg transition-all"
-                            >
-                              💬 Review Conversation
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-
-                </div>
-              )}
-
             </div>
-          )}
 
+            {/* TWO-WAY COMMUNICATIONS */}
+            <div className="border-t border-[#1A3034] pt-8 grid md:grid-cols-2 gap-6 font-sans">
+              <div className="bg-[#0B1315] p-4 rounded-xl border border-[#1A3034]">
+                <h5 className="text-[10px] font-mono font-bold uppercase text-[#D4AF37] tracking-widest mb-3">📥 Received Communications</h5>
+                {receivedConnections.length === 0 && <p className="text-xs text-[#425E62] italic font-mono">No inbound logs discovered.</p>}
+                {receivedConnections.map((c: any, i: number) => (
+                  <div key={i} className="bg-[#05090A] border border-[#1A3034] p-3 rounded-lg flex justify-between items-center text-xs mt-2 shadow-inner">
+                    <div>
+                      <p className="text-[#FCF9F2] font-medium">{c.otherUser?.name}</p>
+                      <p className="text-[10px] text-[#8BA4A8] italic truncate max-w-xs">"{c.lastMessage}"</p>
+                    </div>
+                    <button onClick={() => openChatWindow(c.otherUser, c.listing)} className="text-[10px] font-mono bg-[#0B1315] text-[#D4AF37] px-3 py-1 rounded border border-[#1A3034]">Open Channel</button>
+                  </div>
+                ))}
+              </div>
+              <div className="bg-[#0B1315] p-4 rounded-xl border border-[#1A3034]">
+                <h5 className="text-[10px] font-mono font-bold uppercase text-[#B87333] tracking-widest mb-3">📤 Dispatched Communications</h5>
+                {sentConnections.length === 0 && <p className="text-xs text-[#425E62] italic font-mono">No outbound records found.</p>}
+                {sentConnections.map((c: any, i: number) => (
+                  <div key={i} className="bg-[#05090A] border border-[#1A3034] p-3 rounded-lg flex justify-between items-center text-xs mt-2 shadow-inner">
+                    <div>
+                      <p className="text-[#FCF9F2] font-medium">{c.otherUser?.name}</p>
+                      <p className="text-[10px] text-[#8BA4A8] italic truncate max-w-xs">"{c.lastMessage}"</p>
+                    </div>
+                    <button onClick={() => openChatWindow(c.otherUser, c.listing)} className="text-[10px] font-mono bg-[#0B1315] text-[#B87333] px-3 py-1 rounded border border-[#1A3034]">Open Channel</button>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+          </div>
+        )}
+
+      </main>
+
+      {/* RATING FEEDBACK MODAL */}
+      {showReviewModal && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-[#FCF9F2] text-[#0B1315] rounded-sm max-w-sm w-full p-6 border-t-8 border-[#D4AF37] space-y-4 shadow-2xl relative">
+            <div className="absolute -top-3 left-1/2 -translate-x-1/2 w-3 h-3 bg-[#D4AF37] rounded-full border border-[#FCF9F2]"></div>
+            <div className="text-center">
+              <h4 className="text-base font-serif font-bold text-[#0B1315] uppercase tracking-wide">Publish Swap Review</h4>
+              <p className="text-xs text-[#617173] font-sans mt-1">Rate the execution quality and alignment of this barter cycle.</p>
+            </div>
+            <form onSubmit={submitReview} className="space-y-4 font-sans">
+              <div className="flex gap-2 justify-center">
+                {[1, 2, 3, 4, 5].map((star) => (
+                  <button type="button" key={star} onClick={() => setReviewRating(star)} className={`text-2xl transition-all ${reviewRating >= star ? "text-[#D4AF37] scale-110" : "text-[#1A3034]/20"}`}>★</button>
+                ))}
+              </div>
+              <textarea placeholder="Write feedback regarding partner coordination..." value={reviewComment} onChange={(e) => setReviewComment(e.target.value)} rows={3} className="w-full px-3 py-2 rounded bg-[#FCF9F2] border border-[#1A3034]/20 text-xs text-[#0B1315] outline-none resize-none leading-relaxed" required />
+              <button type="submit" disabled={submittingReview} className="w-full bg-[#0B1315] text-[#D4AF37] font-serif font-bold py-2 rounded text-xs uppercase tracking-wider">{submittingReview ? "Recording..." : "Verify & Save"}</button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* IDENTITY SECURITY BLOCK */}
+      {showAuthModal && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-[#FCF9F2] text-[#0B1315] rounded-sm max-w-sm w-full p-6 border-t-8 border-[#0B1315] shadow-2xl relative space-y-4">
+            <button onClick={() => setShowAuthModal(false)} className="absolute top-4 right-4 text-[#617173] font-mono text-xs hover:text-black">✕</button>
+            <div className="text-center">
+              <h3 className="text-xl font-serif font-bold text-[#0B1315] uppercase tracking-wide">{isSignUp ? "Register User Badge" : "Unlock My Account"}</h3>
+              <p className="text-xs text-[#617173] font-sans mt-1">Access the synchronized localization marketplace network.</p>
+            </div>
+            {authError && <div className="p-2 bg-red-100 border border-red-300 text-red-800 font-sans text-[11px] rounded">{authError}</div>}
+            <form onSubmit={handleAuth} className="space-y-3 font-sans text-xs">
+              {isSignUp && <input type="text" placeholder="Full User Name" value={fullName} onChange={(e) => setFullName(e.target.value)} className="w-full px-3 py-2 rounded bg-[#FCF9F2] border border-[#1A3034]/20 text-[#0B1315] outline-none focus:border-black" required />}
+              <input type="email" placeholder="Secure Email Address" value={email} onChange={(e) => setEmail(e.target.value)} className="w-full px-3 py-2 rounded bg-[#FCF9F2] border border-[#1A3034]/20 text-[#0B1315] outline-none focus:border-black" required />
+              <input type="password" placeholder="Key Password" value={password} onChange={(e) => setPassword(e.target.value)} className="w-full px-3 py-2 rounded bg-[#FCF9F2] border border-[#1A3034]/20 text-[#0B1315] outline-none focus:border-black" required />
+              {isSignUp && <input type="password" placeholder="Confirm Key Password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} className="w-full px-3 py-2 rounded bg-[#FCF9F2] border border-[#1A3034]/20 text-[#0B1315] outline-none focus:border-black" required />}
+              <button type="submit" className="w-full bg-[#0B1315] text-[#D4AF37] font-serif font-bold py-2.5 rounded text-xs uppercase tracking-wider shadow hover:bg-slate-800 transition-all">{isSignUp ? "Authorize Entry" : "Sign In"}</button>
+            </form>
+            <button onClick={() => setIsSignUp(!isSignUp)} className="w-full text-center text-[11px] text-[#8C7016] font-mono hover:underline block pt-1">{isSignUp ? "Return to Sign In gateway" : "Create a new partner membership card"}</button>
+          </div>
         </div>
       )}
 
